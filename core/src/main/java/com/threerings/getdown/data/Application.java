@@ -5,17 +5,21 @@
 
 package com.threerings.getdown.data;
 
+import com.threerings.getdown.net.Connector;
+import com.threerings.getdown.util.Base64;
+import com.threerings.getdown.util.*;
+
 import java.io.*;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
-import java.net.Proxy;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.net.URLConnection;
 import java.net.URLEncoder;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.*;
 import java.security.cert.Certificate;
 import java.util.*;
@@ -23,219 +27,115 @@ import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.threerings.getdown.net.Connector;
-import com.threerings.getdown.util.*;
-// avoid ambiguity with java.util.Base64 which we can't use as it's 1.8+
-import com.threerings.getdown.util.Base64;
-
 import static com.threerings.getdown.Log.log;
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Parses and provide access to the information contained in the {@code getdown.txt}
  * configuration file.
  */
-public class Application
-{
-    /** The name of our configuration file. */
+public class Application {
+    /**
+     * The name of our configuration file.
+     */
     public static final String CONFIG_FILE = "getdown.txt";
 
-    /** The name of our target version file. */
+    /**
+     * The name of our target version file.
+     */
     public static final String VERSION_FILE = "version.txt";
 
-    /** System properties that are prefixed with this string will be passed through to our
-     * application (minus this prefix). */
+    public static final String AUTHENTICATION_FILE = "authentication.txt";
+
+    /**
+     * System properties that are prefixed with this string will be passed through to our
+     * application (minus this prefix).
+     */
     public static final String PROP_PASSTHROUGH_PREFIX = "app.";
 
-    /** Suffix used for control file signatures. */
+    /**
+     * Suffix used for control file signatures.
+     */
     public static final String SIGNATURE_SUFFIX = ".sig";
 
-    /** A special classname that means 'use -jar code.jar' instead of a classname. */
+    /**
+     * A special classname that means 'use -jar code.jar' instead of a classname.
+     */
     public static final String MANIFEST_CLASS = "manifest";
-
-    /** Used to communicate information about the UI displayed when updating the application. */
-    public static final class UpdateInterface
-    {
-        /**
-         * The major steps involved in updating, along with some arbitrary percentages
-         * assigned to them, to mark global progress.
-         */
-        public enum Step
-        {
-            UPDATE_JAVA(10),
-            VERIFY_METADATA(15, 65, 95),
-            DOWNLOAD(40),
-            PATCH(60),
-            VERIFY_RESOURCES(70, 97),
-            REDOWNLOAD_RESOURCES(90),
-            UNPACK(98),
-            LAUNCH(99);
-
-            /** What is the final percent value for this step? */
-            public final List<Integer> defaultPercents;
-
-            /** Enum constructor. */
-            Step (int... percents)
-            {
-                this.defaultPercents = intsToList(percents);
-            }
-        }
-
-        /** The human readable name of this application. */
-        public final String name;
-
-        /** A background color, just in case. */
-        public final int background;
-
-        /** Background image specifiers for `RotatingBackgrounds`. */
-        public final List<String> rotatingBackgrounds;
-
-        /** The error background image for `RotatingBackgrounds`. */
-        public final String errorBackground;
-
-        /** The paths (relative to the appdir) of images for the window icon. */
-        public final List<String> iconImages;
-
-        /** The path (relative to the appdir) to a single background image. */
-        public final String backgroundImage;
-
-        /** The path (relative to the appdir) to the progress bar image. */
-        public final String progressImage;
-
-        /** The dimensions of the progress bar. */
-        public final Rectangle progress;
-
-        /** The color of the progress text. */
-        public final int progressText;
-
-        /** The color of the progress bar. */
-        public final int progressBar;
-
-        /** The dimensions of the status display. */
-        public final Rectangle status;
-
-        /** The color of the status text. */
-        public final int statusText;
-
-        /** The color of the text shadow. */
-        public final int textShadow;
-
-        /** Where to point the user for help with install errors. */
-        public final String installError;
-
-        /** The dimensions of the patch notes button. */
-        public final Rectangle patchNotes;
-
-        /** The patch notes URL. */
-        public final String patchNotesUrl;
-
-        /** Whether window decorations are hidden for the UI. */
-        public final boolean hideDecorations;
-
-        /** Whether progress text should be hidden or not. */
-        public final boolean hideProgressText;
-
-        /** The minimum number of seconds to display the GUI. This is to prevent the GUI from
-          * flashing up on the screen and immediately disappearing, which can be confusing to the
-          * user. */
-        public final int minShowSeconds;
-
-        /** The global percentages for each step. A step may have more than one, and
-         * the lowest reasonable one is used if a step is revisited. */
-        public final Map<Step, List<Integer>> stepPercentages;
-
-        /** Generates a string representation of this instance. */
-        @Override
-        public String toString ()
-        {
-            return "[name=" + name + ", bg=" + background + ", bg=" + backgroundImage +
-                ", pi=" + progressImage + ", prect=" + progress + ", pt=" + progressText +
-                ", pb=" + progressBar + ", srect=" + status + ", st=" + statusText +
-                ", shadow=" + textShadow + ", err=" + installError + ", nrect=" + patchNotes +
-                ", notes=" + patchNotesUrl + ", stepPercentages=" + stepPercentages +
-                ", hideProgressText" + hideProgressText + ", minShow=" + minShowSeconds + "]";
-        }
-
-        public UpdateInterface (Config config)
-        {
-            this.name = config.getString("ui.name");
-            this.progress = config.getRect("ui.progress", new Rectangle(5, 5, 300, 15));
-            this.progressText = config.getColor("ui.progress_text", Color.BLACK);
-            this.hideProgressText =  config.getBoolean("ui.hide_progress_text");
-            this.minShowSeconds = config.getInt("ui.min_show_seconds", 5);
-            this.progressBar = config.getColor("ui.progress_bar", 0x6699CC);
-            this.status = config.getRect("ui.status", new Rectangle(5, 25, 500, 100));
-            this.statusText = config.getColor("ui.status_text", Color.BLACK);
-            this.textShadow = config.getColor("ui.text_shadow", Color.CLEAR);
-            this.hideDecorations = config.getBoolean("ui.hide_decorations");
-            this.backgroundImage = config.getString("ui.background_image");
-            // default to black or white bg color, depending on the brightness of the progressText
-            int defaultBackground = (0.5f < Color.brightness(this.progressText)) ?
-                Color.BLACK : Color.WHITE;
-            this.background = config.getColor("ui.background", defaultBackground);
-            this.progressImage = config.getString("ui.progress_image");
-            this.rotatingBackgrounds = stringsToList(
-                config.getMultiValue("ui.rotating_background"));
-            this.iconImages = stringsToList(config.getMultiValue("ui.icon"));
-            this.errorBackground = config.getString("ui.error_background");
-
-            // On an installation error, where do we point the user.
-            String installError = config.getUrl("ui.install_error", null);
-            this.installError = (installError == null) ?
-                "m.default_install_error" : MessageUtil.taint(installError);
-
-            // the patch notes bits
-            this.patchNotes = config.getRect("ui.patch_notes", new Rectangle(5, 50, 112, 26));
-            this.patchNotesUrl = config.getUrl("ui.patch_notes_url", null);
-
-            // step progress percentage (defaults and then customized values)
-            EnumMap<Step, List<Integer>> stepPercentages = new EnumMap<>(Step.class);
-            for (Step step : Step.values()) {
-                stepPercentages.put(step, step.defaultPercents);
-            }
-            for (UpdateInterface.Step step : UpdateInterface.Step.values()) {
-                String spec = config.getString("ui.percents." + step.name());
-                if (spec != null) {
-                    try {
-                        stepPercentages.put(step, intsToList(StringUtil.parseIntArray(spec)));
-                    } catch (Exception e) {
-                        log.warning("Failed to parse percentages for " + step + ": " + spec);
-                    }
-                }
-            }
-            this.stepPercentages = Collections.unmodifiableMap(stepPercentages);
-        }
-    }
+    protected static final String[] EMPTY_STRING_ARRAY = new String[0];
+    protected static final String ENV_VAR_PREFIX = "%ENV.";
+    protected static final Pattern ENV_VAR_PATTERN = Pattern.compile("%ENV\\.(.*?)%");
+    protected final EnvConfig _envc;
+    protected final List<Resource> _codes = new ArrayList<>();
+    protected final List<Resource> _resources = new ArrayList<>();
+    protected final List<String> _cleanupPatterns = new ArrayList<>();
+    protected final List<String> _cpdirs = new ArrayList<>();
+    protected final Map<String, AuxGroup> _auxgroups = new HashMap<>();
+    protected final Map<String, Boolean> _auxactive = new HashMap<>();
+    protected final List<String> _jvmargs = new ArrayList<>();
+    protected final List<String> _appargs = new ArrayList<>();
+    protected final List<String> _txtJvmArgs = new ArrayList<>();
+    protected final Random _rando = new Random();
+    /**
+     * A helper that is used to do HTTP downloads. This must be configured prior to using the
+     * application instance. Yes this is a public mutable field, no I'm not going to create a
+     * getter and setter just to pretend like that's not the case.
+     */
+    public Connector conn = Connector.DEFAULT;
+    protected Digest _digest;
+    protected long _version = -1;
+    protected long _targetVersion = -1;
+    protected String _appbase;
+    protected URL _vappbase;
+    protected URL _latest;
+    protected String _class;
+    protected String _dockName;
+    protected String _dockIconPath;
+    protected boolean _strictComments;
+    protected boolean _allowOffline;
+    protected int _maxConcDownloads;
+    protected String _trackingURL;
+    protected Set<Integer> _trackingPcts;
+    protected String _trackingCookieName;
+    protected String _trackingCookieProperty;
+    protected String _trackingURLSuffix;
+    protected String _trackingGAHash;
+    protected long _trackingStart;
+    protected int _trackingId;
+    protected String _javaVersionProp = "java.version";
+    protected String _javaVersionRegex = "(\\d+)(?:\\.(\\d+)(?:\\.(\\d+)(_\\d+)?)?)?";
+    protected long _javaMinVersion, _javaMaxVersion;
+    protected boolean _javaExactVersionRequired;
+    protected String _javaLocation;
+    protected File _javaLocalDir;
+    protected int _verifyTimeout = 60;
+    protected RevalidatePolicy _revalidatePolicy = RevalidatePolicy.AFTER_UPDATE;
+    protected boolean _useCodeCache;
+    protected int _codeCacheRetentionDays;
+    protected String[] _optimumJvmArgs;
+    protected boolean useAuthentication;
+    /**
+     * Locks gettingdown.lock in the app dir. Held the entire time updating is going on.
+     */
+    protected FileLock _lock;
+    /**
+     * Channel to the file underlying _lock.  Kept around solely so the lock doesn't close.
+     */
+    protected FileChannel _lockChannel;
+    private String username;
+    private String password;
 
     /**
-     * Used by {@link #verifyMetadata} to communicate status in circumstances where it needs to
-     * take network actions.
+     * Creates an application instance which records the location of the {@code getdown.txt}
+     * configuration file from the supplied application directory.
      */
-    public interface StatusDisplay
-    {
-        /** Requests that the specified status message be displayed. */
-        void updateStatus (String message);
-    }
-
-    /**
-     * Contains metadata for an auxiliary resource group.
-     */
-    public static class AuxGroup {
-        public final String name;
-        public final List<Resource> codes;
-        public final List<Resource> rsrcs;
-
-        public AuxGroup (String name, List<Resource> codes, List<Resource> rsrcs) {
-            this.name = name;
-            this.codes = Collections.unmodifiableList(codes);
-            this.rsrcs = Collections.unmodifiableList(rsrcs);
-        }
+    public Application(EnvConfig envc) {
+        _envc = envc;
     }
 
     /**
      * Reads the {@code getdown.txt} config file into a {@code Config} object and returns it.
      */
-    public static Config readConfig (EnvConfig envc, boolean checkPlatform) {
+    public static Config readConfig(EnvConfig envc, boolean checkPlatform) {
         Config config = null;
         File cfgfile = new File(envc.appDir, CONFIG_FILE);
         Config.ParseOpts opts = Config.createOpts(checkPlatform);
@@ -270,24 +170,51 @@ public class Application
         return config;
     }
 
-    /** A helper that is used to do HTTP downloads. This must be configured prior to using the
-      * application instance. Yes this is a public mutable field, no I'm not going to create a
-      * getter and setter just to pretend like that's not the case. */
-    public Connector conn = Connector.DEFAULT;
+    /**
+     * Helper function to add all values in {@code values} (if non-null) to {@code target}.
+     */
+    protected static void addAll(String[] values, List<String> target) {
+        if (values != null) {
+            Collections.addAll(target, values);
+        }
+    }
 
     /**
-     * Creates an application instance which records the location of the {@code getdown.txt}
-     * configuration file from the supplied application directory.
-     *
+     * Make an immutable List from the specified int array.
      */
-    public Application (EnvConfig envc) {
-        _envc = envc;
+    public static List<Integer> intsToList(int[] values) {
+        List<Integer> list = new ArrayList<>(values.length);
+        for (int val : values) {
+            list.add(val);
+        }
+        return Collections.unmodifiableList(list);
+    }
+
+    /**
+     * Make an immutable List from the specified String array.
+     */
+    public static List<String> stringsToList(String[] values) {
+        return values == null ? null : Collections.unmodifiableList(Arrays.asList(values));
+    }
+
+    /**
+     * Encodes a path for use in a URL.
+     */
+    protected static String encodePath(String path) {
+        try {
+            // we want to keep slashes because we're encoding an entire path; also we need to turn
+            // + into %20 because web servers don't like + in paths or file names, blah
+            return URLEncoder.encode(path, "UTF-8").replace("%2F", "/").replace("+", "%20");
+        } catch (UnsupportedEncodingException ue) {
+            log.warning("Failed to URL encode " + path + ": " + ue);
+            return path;
+        }
     }
 
     /**
      * Returns the configured application directory.
      */
-    public File getAppDir () {
+    public File getAppDir() {
         return _envc.appDir;
     }
 
@@ -295,8 +222,7 @@ public class Application
      * Returns whether the application should cache code resources prior to launching the
      * application.
      */
-    public boolean useCodeCache ()
-    {
+    public boolean useCodeCache() {
         return _useCodeCache;
     }
 
@@ -304,8 +230,7 @@ public class Application
      * Returns the number of days a cached code resource is allowed to stay unused before it
      * becomes eligible for deletion.
      */
-    public int getCodeCacheRetentionDays ()
-    {
+    public int getCodeCacheRetentionDays() {
         return _codeCacheRetentionDays;
     }
 
@@ -313,15 +238,14 @@ public class Application
      * Returns the configured maximum concurrent downloads. Used to cap simultaneous downloads of
      * app files from its hosting server.
      */
-    public int maxConcurrentDownloads () {
+    public int maxConcurrentDownloads() {
         return _maxConcDownloads;
     }
 
     /**
      * Returns a resource that refers to the application configuration file itself.
      */
-    public Resource getConfigResource ()
-    {
+    public Resource getConfigResource() {
         try {
             return createResource(CONFIG_FILE, Resource.NORMAL);
         } catch (Exception e) {
@@ -332,16 +256,14 @@ public class Application
     /**
      * Returns a list of the code {@link Resource} objects used by this application.
      */
-    public List<Resource> getCodeResources ()
-    {
+    public List<Resource> getCodeResources() {
         return _codes;
     }
 
     /**
      * Returns a list of the non-code {@link Resource} objects used by this application.
      */
-    public List<Resource> getResources ()
-    {
+    public List<Resource> getResources() {
         return _resources;
     }
 
@@ -349,16 +271,14 @@ public class Application
      * Returns a list of strings (usually file paths relative to the app root dir) to add to the
      * classpath.
      */
-    public List<String> getClassPathDirectories ()
-    {
+    public List<String> getClassPathDirectories() {
         return _cpdirs;
     }
 
     /**
      * Returns the digest of the given {@code resource}.
      */
-    public String getDigest (Resource resource)
-    {
+    public String getDigest(Resource resource) {
         return _digest.getDigest(resource);
     }
 
@@ -373,8 +293,7 @@ public class Application
      * Returns a list of all the active {@link Resource} objects used by this application (code and
      * non-code).
      */
-    public List<Resource> getAllActiveResources ()
-    {
+    public List<Resource> getAllActiveResources() {
         List<Resource> allResources = new ArrayList<>();
         allResources.addAll(getActiveCodeResources());
         allResources.addAll(getActiveResources());
@@ -384,8 +303,7 @@ public class Application
     /**
      * Returns the auxiliary resource group with the specified name, or null.
      */
-    public AuxGroup getAuxGroup (String name)
-    {
+    public AuxGroup getAuxGroup(String name) {
         return _auxgroups.get(name);
     }
 
@@ -394,8 +312,7 @@ public class Application
      * resource group is a collection of resource files that are not downloaded unless a group
      * token file is present in the application directory.
      */
-    public Iterable<AuxGroup> getAuxGroups ()
-    {
+    public Iterable<AuxGroup> getAuxGroups() {
         return _auxgroups.values();
     }
 
@@ -404,8 +321,7 @@ public class Application
      * groups should be ignored, activated groups should be downloaded and patched along with the
      * main resources.
      */
-    public boolean isAuxGroupActive (String auxgroup)
-    {
+    public boolean isAuxGroupActive(String auxgroup) {
         Boolean active = _auxactive.get(auxgroup);
         if (active == null) {
             // TODO: compare the contents with the MD5 hash of the auxgroup name and the client's
@@ -419,8 +335,7 @@ public class Application
     /**
      * Returns all main code resources and all code resources from active auxiliary resource groups.
      */
-    public List<Resource> getActiveCodeResources ()
-    {
+    public List<Resource> getActiveCodeResources() {
         List<Resource> codes = new ArrayList<>(getCodeResources());
         for (AuxGroup aux : getAuxGroups()) {
             if (isAuxGroupActive(aux.name)) {
@@ -433,10 +348,9 @@ public class Application
     /**
      * Returns all resources indicated to contain native library files (.dll, .so, etc.).
      */
-    public List<Resource> getNativeResources ()
-    {
+    public List<Resource> getNativeResources() {
         List<Resource> natives = new ArrayList<>();
-        for (Resource resource: _resources) {
+        for (Resource resource : _resources) {
             if (resource.isNative()) {
                 natives.add(resource);
             }
@@ -447,8 +361,7 @@ public class Application
     /**
      * Returns all non-code resources and all resources from active auxiliary resource groups.
      */
-    public List<Resource> getActiveResources ()
-    {
+    public List<Resource> getActiveResources() {
         List<Resource> rsrcs = new ArrayList<>(getResources());
         for (AuxGroup aux : getAuxGroups()) {
             if (isAuxGroupActive(aux.name)) {
@@ -463,10 +376,9 @@ public class Application
      * application from its current version to the target version.
      *
      * @param auxgroup the auxiliary resource group for which a patch resource is desired or null
-     * for the main application patch resource.
+     *                 for the main application patch resource.
      */
-    public Resource getPatchResource (String auxgroup)
-    {
+    public Resource getPatchResource(String auxgroup) {
         if (_targetVersion <= _version) {
             log.warning("Requested patch resource for up-to-date or non-versioned application",
                 "cvers", _version, "tvers", _targetVersion);
@@ -488,8 +400,7 @@ public class Application
     /**
      * @return directory into which a local VM installation should be unpacked.
      */
-    public File getJavaLocalDir ()
-    {
+    public File getJavaLocalDir() {
         return _javaLocalDir;
     }
 
@@ -498,8 +409,7 @@ public class Application
      * place of the installed VM (in the case where the VM that launched Getdown does not meet the
      * application's version requirements) or null if no VM is available for this platform.
      */
-    public Resource getJavaVMResource ()
-    {
+    public Resource getJavaVMResource() {
         if (StringUtil.isBlank(_javaLocation)) {
             return null;
         }
@@ -510,7 +420,7 @@ public class Application
         try {
             URL remote = new URL(createVAppBase(_targetVersion), encodePath(_javaLocation));
             return new Resource(vmfile, remote, getLocalPath(vmfile),
-                                EnumSet.of(Resource.Attr.UNPACK, Resource.Attr.CLEAN));
+                EnumSet.of(Resource.Attr.UNPACK, Resource.Attr.CLEAN));
         } catch (Exception e) {
             log.warning("Failed to create VM resource", "vmfile", vmfile, "appbase", _appbase,
                 "tvers", _targetVersion, "javaloc", _javaLocation, "error", e);
@@ -522,8 +432,7 @@ public class Application
      * Returns a resource that can be used to download an archive containing all files belonging to
      * the application.
      */
-    public Resource getFullResource ()
-    {
+    public Resource getFullResource() {
         String file = "full";
         try {
             URL remote = new URL(createVAppBase(_targetVersion), encodePath(file));
@@ -541,8 +450,7 @@ public class Application
      *
      * @param event the event to be reported: start, jvm_start, jvm_complete, complete.
      */
-    public URL getTrackingURL (String event)
-    {
+    public URL getTrackingURL(String event) {
         try {
             String suffix = _trackingURLSuffix == null ? "" : _trackingURLSuffix;
             String ga = getGATrackingCode();
@@ -559,8 +467,7 @@ public class Application
      * initial download. Returns null if no tracking request was configured for the specified
      * percentage.
      */
-    public URL getTrackingProgressURL (int percent)
-    {
+    public URL getTrackingProgressURL(int percent) {
         if (_trackingPcts == null || !_trackingPcts.contains(percent)) {
             return null;
         }
@@ -570,16 +477,14 @@ public class Application
     /**
      * Returns the name of our tracking cookie or null if it was not set.
      */
-    public String getTrackingCookieName ()
-    {
+    public String getTrackingCookieName() {
         return _trackingCookieName;
     }
 
     /**
      * Returns the name of our tracking cookie system property or null if it was not set.
      */
-    public String getTrackingCookieProperty ()
-    {
+    public String getTrackingCookieProperty() {
         return _trackingCookieProperty;
     }
 
@@ -590,12 +495,10 @@ public class Application
      * getdown.txt} file and try again.
      *
      * @return a {@code Config} instance that contains information from the config file.
-     *
-     * @exception IOException thrown if there is an error reading the file or an error encountered
-     * during its parsing.
+     * @throws IOException thrown if there is an error reading the file or an error encountered
+     *                     during its parsing.
      */
-    public Config init (boolean checkPlatform) throws IOException
-    {
+    public Config init(boolean checkPlatform) throws IOException {
         Config config = readConfig(_envc, checkPlatform);
         initBase(config);
         initJava(config);
@@ -610,7 +513,7 @@ public class Application
      * Reads the basic config info from {@code config} into this instance. This includes things
      * like the appbase and version.
      */
-    public void initBase (Config config) throws IOException {
+    public void initBase(Config config) throws IOException {
         // first extract our version information
         _version = config.getLong("version", -1L);
 
@@ -653,6 +556,8 @@ public class Application
             }
         }
 
+        useAuthentication = config.getBoolean("use_authentication");
+
         // read some miscellaneous configurations
         _strictComments = config.getBoolean("strict_comments");
         _allowOffline = config.getBoolean("allow_offline");
@@ -671,7 +576,7 @@ public class Application
      * Reads the JVM requirements from {@code config} into this instance. This includes things like
      * the min and max java version, location of a locally installed JRE, etc.
      */
-    public void initJava (Config config) {
+    public void initJava(Config config) {
         // check to see if we're using a custom java.version property and regex
         _javaVersionProp = config.getString("java_version_prop", _javaVersionProp);
         _javaVersionRegex = config.getString("java_version_regex", _javaVersionRegex);
@@ -695,7 +600,7 @@ public class Application
     /**
      * Reads the install tracking info from {@code config} into this instance.
      */
-    public void initTracking (Config config) {
+    public void initTracking(Config config) {
         // determine whether we have any tracking configuration
         _trackingURL = config.getString("tracking_url");
 
@@ -725,7 +630,7 @@ public class Application
     /**
      * Reads the app resource info from {@code config} into this instance.
      */
-    public void initResources (Config config) throws IOException {
+    public void initResources(Config config) throws IOException {
         // clear our arrays as we may be reinitializing
         _codes.clear();
         _resources.clear();
@@ -764,7 +669,7 @@ public class Application
     /**
      * Reads the cleanup patterns from {@code config} into this instance.
      */
-    public void initCleanupPatterns (Config config) {
+    public void initCleanupPatterns(Config config) {
         // clear our arrays as we may be reinitializing
         _cleanupPatterns.clear();
 
@@ -780,7 +685,7 @@ public class Application
     /**
      * Reads the command line arg info from {@code config} into this instance.
      */
-    public void initArgs (Config config) throws IOException {
+    public void initArgs(Config config) throws IOException {
         _jvmargs.clear();
         _appargs.clear();
         _txtJvmArgs.clear();
@@ -826,8 +731,7 @@ public class Application
     /**
      * Adds strings of the form pair0=pair1 to collector for each pair parsed out of pairLocation.
      */
-    protected void fillAssignmentListFromPairs (String pairLocation, List<String> collector)
-    {
+    protected void fillAssignmentListFromPairs(String pairLocation, List<String> collector) {
         File pairFile = getLocalPath(pairLocation);
         if (pairFile.exists()) {
             try {
@@ -938,6 +842,10 @@ public class Application
         return _allowOffline;
     }
 
+    public boolean useAuthentication(){
+        return useAuthentication;
+    }
+
     /**
      * Attempts to redownload the {@code getdown.txt} file based on information parsed from a
      * previous call to {@link #init}.
@@ -992,11 +900,10 @@ public class Application
      * Invokes the process associated with this application definition.
      *
      * @param optimum whether or not to include the set of optimum arguments (as opposed to falling
-     * back).
+     *                back).
      */
-    public Process createProcess (boolean optimum)
-        throws IOException
-    {
+    public Process createProcess(boolean optimum)
+        throws IOException {
         ArrayList<String> args = new ArrayList<>();
 
         // reconstruct the path to the JVM
@@ -1033,7 +940,7 @@ public class Application
 
         // pass along any pass-through arguments
         for (Map.Entry<Object, Object> entry : System.getProperties().entrySet()) {
-            String key = (String)entry.getKey();
+            String key = (String) entry.getKey();
             if (key.startsWith(PROP_PASSTHROUGH_PREFIX)) {
                 key = key.substring(PROP_PASSTHROUGH_PREFIX.length());
                 args.add("-D" + key + "=" + entry.getValue());
@@ -1083,8 +990,7 @@ public class Application
      * If the application didn't provide any environment variables, null is returned to just use
      * the existing environment.
      */
-    protected String[] createEnvironment ()
-    {
+    protected String[] createEnvironment() {
         List<String> envvar = new ArrayList<>();
         fillAssignmentListFromPairs("env.txt", envvar);
         if (envvar.isEmpty()) {
@@ -1107,14 +1013,14 @@ public class Application
     /**
      * Runs this application directly in the current VM.
      */
-    public void invokeDirect () throws IOException
-    {
+    public void invokeDirect() throws IOException {
         ClassPath classPath = PathBuilder.buildClassPath(this);
         URL[] jarUrls = classPath.asUrls();
 
         // create custom class loader
         URLClassLoader loader = new URLClassLoader(jarUrls, ClassLoader.getSystemClassLoader()) {
-            @Override protected PermissionCollection getPermissions (CodeSource code) {
+            @Override
+            protected PermissionCollection getPermissions(CodeSource code) {
                 Permissions perms = new Permissions();
                 perms.add(new AllPermission());
                 return perms;
@@ -1133,7 +1039,7 @@ public class Application
                 if (eqidx == -1) {
                     log.warning("Bogus system property: '" + jvmarg + "'?");
                 } else {
-                    System.setProperty(jvmarg.substring(0, eqidx), jvmarg.substring(eqidx+1));
+                    System.setProperty(jvmarg.substring(0, eqidx), jvmarg.substring(eqidx + 1));
                 }
             }
         }
@@ -1141,10 +1047,10 @@ public class Application
         // pass along any pass-through arguments
         Map<String, String> passProps = new HashMap<>();
         for (Map.Entry<Object, Object> entry : System.getProperties().entrySet()) {
-            String key = (String)entry.getKey();
+            String key = (String) entry.getKey();
             if (key.startsWith(PROP_PASSTHROUGH_PREFIX)) {
                 key = key.substring(PROP_PASSTHROUGH_PREFIX.length());
-                passProps.put(key, (String)entry.getValue());
+                passProps.put(key, (String) entry.getValue());
             }
         }
         // we can't set these in the above loop lest we get a ConcurrentModificationException
@@ -1161,7 +1067,7 @@ public class Application
             Class<?> appclass = loader.loadClass(_class);
             Method main = appclass.getMethod("main", EMPTY_STRING_ARRAY.getClass());
             log.info("Invoking main({" + StringUtil.join(args, ", ") + "})");
-            main.invoke(null, new Object[] { args });
+            main.invoke(null, new Object[]{args});
         } catch (Exception e) {
             log.warning("Failure invoking app main", e);
         }
@@ -1285,7 +1191,7 @@ public class Application
             if (_latest != null) {
                 try {
                     List<String[]> vdata = Config.parsePairs(
-                        new StringReader(conn.fetch(_latest)), Config.createOpts(false));
+                        new StringReader(conn.fetch(_latest, getBasicAuth())), Config.createOpts(false));
                     for (String[] pair : vdata) {
                         if ("version".equals(pair[0])) {
                             _targetVersion = Math.max(Long.parseLong(pair[1]), _targetVersion);
@@ -1348,9 +1254,9 @@ public class Application
         // as long as we forward aggregated progress updates to the UI thread, having multiple
         // threads update a progress aggregator is "mostly" thread-safe
         final ProgressAggregator pagg = new ProgressAggregator(new ProgressObserver() {
-            public void progress (final int percent) {
+            public void progress(final int percent) {
                 actions.add(new Runnable() {
-                    public void run () {
+                    public void run() {
                         fobs.progress(percent);
                     }
                 });
@@ -1366,11 +1272,11 @@ public class Application
             final Resource rsrc = rsrcs.get(ii);
             final int index = ii;
             exec.execute(new Runnable() {
-                public void run () {
+                public void run() {
                     verifyResource(rsrc, pagg.startElement(index), fAlreadyValid,
-                                   unpackedAsync, toInstallAsync, toDownloadAsync);
+                        unpackedAsync, toInstallAsync, toDownloadAsync);
                     actions.add(new Runnable() {
-                        public void run () {
+                        public void run() {
                             completed[0] += 1;
                         }
                     });
@@ -1396,12 +1302,12 @@ public class Application
 
         long complete = System.currentTimeMillis();
         log.info("Verified resources", "count", rsrcs.size(), "alreadyValid", alreadyValid[0],
-                 "size", (totalSize/1024) + "k", "duration", (complete-start) + "ms");
+            "size", (totalSize / 1024) + "k", "duration", (complete - start) + "ms");
     }
 
-    private void verifyResource (Resource rsrc, ProgressObserver obs, int[] alreadyValid,
-                                 Set<Resource> unpacked,
-                                 Set<Resource> toInstall, Set<Resource> toDownload) {
+    private void verifyResource(Resource rsrc, ProgressObserver obs, int[] alreadyValid,
+                                Set<Resource> unpacked,
+                                Set<Resource> toInstall, Set<Resource> toDownload) {
         if (_revalidatePolicy != RevalidatePolicy.ALWAYS && rsrc.isMarkedValid()) {
             if (alreadyValid != null) {
                 alreadyValid[0]++;
@@ -1425,7 +1331,7 @@ public class Application
 
         } catch (Exception e) {
             log.info("Failure verifying resource. Requesting redownload...",
-                     "rsrc", rsrc, "error", e);
+                "rsrc", rsrc, "error", e);
 
         } finally {
             obs.progress(100);
@@ -1438,7 +1344,7 @@ public class Application
      *
      * @param unpacked a set of resources to skip because they're already unpacked.
      */
-    public void unpackResources (ProgressObserver obs, Set<Resource> unpacked) {
+    public void unpackResources(ProgressObserver obs, Set<Resource> unpacked) {
         List<Resource> rsrcs = getActiveResources();
 
         // remove resources that we don't want to unpack
@@ -1471,8 +1377,7 @@ public class Application
     /**
      * Clears all validation marker files.
      */
-    public void clearValidationMarkers ()
-    {
+    public void clearValidationMarkers() {
         clearValidationMarkers(getAllActiveResources().iterator());
     }
 
@@ -1480,17 +1385,15 @@ public class Application
      * Returns the version number for the application.  Should only be called after successful
      * return of verifyMetadata.
      */
-    public long getVersion ()
-    {
+    public long getVersion() {
         return _version;
     }
 
     /**
      * Creates a versioned application base URL for the specified version.
      */
-    protected URL createVAppBase (long version)
-        throws MalformedURLException
-    {
+    protected URL createVAppBase(long version)
+        throws MalformedURLException {
         String url = version < 0 ? _appbase : _appbase.replace("%VERSION%", String.valueOf(version));
         return HostWhitelist.verify(new URL(url));
     }
@@ -1498,8 +1401,7 @@ public class Application
     /**
      * Clears all validation marker files for the resources in the supplied iterator.
      */
-    protected void clearValidationMarkers (Iterator<Resource> iter)
-    {
+    protected void clearValidationMarkers(Iterator<Resource> iter) {
         while (iter.hasNext()) {
             iter.next().clearMarker();
         }
@@ -1508,8 +1410,7 @@ public class Application
     /**
      * Downloads a new copy of CONFIG_FILE.
      */
-    protected void downloadConfigFile () throws IOException
-    {
+    protected void downloadConfigFile() throws IOException {
         downloadControlFile(CONFIG_FILE, 0);
     }
 
@@ -1517,8 +1418,7 @@ public class Application
      * @return true if gettingdown.lock was unlocked, already locked by this application or if
      * we're not locking at all.
      */
-    public synchronized boolean lockForUpdates ()
-    {
+    public synchronized boolean lockForUpdates() {
         if (_lock != null && _lock.isValid()) {
             return true;
         }
@@ -1544,8 +1444,7 @@ public class Application
     /**
      * Release gettingdown.lock
      */
-    public synchronized void releaseLock ()
-    {
+    public synchronized void releaseLock() {
         if (_lock != null) {
             log.info("Releasing lock");
             try {
@@ -1565,11 +1464,11 @@ public class Application
 
     /**
      * Downloads the digest files and validates their signature.
+     *
      * @throws IOException
      */
-    protected void downloadDigestFiles ()
-        throws IOException
-    {
+    protected void downloadDigestFiles()
+        throws IOException {
         for (int version = 1; version <= Digest.VERSION; version++) {
             downloadControlFile(Digest.digestFile(version), version);
         }
@@ -1582,12 +1481,11 @@ public class Application
      * <p> TODO: Switch to PKCS #7 or CMS.
      *
      * @param sigVersion if {@code 0} no validation will be performed, if {@code > 0} then this
-     * should indicate the version of the digest file being validated which indicates which
-     * algorithm to use to verify the signature. See {@link Digest#VERSION}.
+     *                   should indicate the version of the digest file being validated which indicates which
+     *                   algorithm to use to verify the signature. See {@link Digest#VERSION}.
      */
-    protected void downloadControlFile (String path, int sigVersion)
-        throws IOException
-    {
+    protected void downloadControlFile(String path, int sigVersion)
+        throws IOException {
         File target = downloadFile(path);
 
         if (sigVersion > 0) {
@@ -1664,48 +1562,23 @@ public class Application
         }
 
         log.info("Attempting to refetch '" + path + "' from '" + targetURL + "'.");
-        conn.download(targetURL, target); // stream the URL into our temporary file
+        conn.download(targetURL, target, getBasicAuth()); // stream the URL into our temporary file
         return target;
     }
 
-    /** Helper function for creating {@link Resource} instances. */
-    protected Resource createResource (String path, EnumSet<Resource.Attr> attrs)
-        throws MalformedURLException
-    {
+    /**
+     * Helper function for creating {@link Resource} instances.
+     */
+    protected Resource createResource(String path, EnumSet<Resource.Attr> attrs)
+        throws MalformedURLException {
         return new Resource(path, getRemoteURL(path), getLocalPath(path), attrs);
     }
 
-    /** Helper function to add all values in {@code values} (if non-null) to {@code target}. */
-    protected static void addAll (String[] values, List<String> target) {
-        if (values != null) {
-            Collections.addAll(target, values);
-        }
-    }
-
     /**
-     * Make an immutable List from the specified int array.
+     * Used to parse resources with the specified name.
      */
-    public static List<Integer> intsToList (int[] values)
-    {
-        List<Integer> list = new ArrayList<>(values.length);
-        for (int val : values) {
-            list.add(val);
-        }
-        return Collections.unmodifiableList(list);
-    }
-
-    /**
-     * Make an immutable List from the specified String array.
-     */
-    public static List<String> stringsToList (String[] values)
-    {
-        return values == null ? null : Collections.unmodifiableList(Arrays.asList(values));
-    }
-
-    /** Used to parse resources with the specified name. */
-    protected void parseResources (Config config, String name, EnumSet<Resource.Attr> attrs,
-                                   List<Resource> list)
-    {
+    protected void parseResources(Config config, String name, EnumSet<Resource.Attr> attrs,
+                                  List<Resource> list) {
         String[] rsrcs = config.getMultiValue(name);
         if (rsrcs == null) {
             return;
@@ -1719,9 +1592,10 @@ public class Application
         }
     }
 
-    /** Possibly generates and returns a google analytics tracking cookie. */
-    protected String getGATrackingCode ()
-    {
+    /**
+     * Possibly generates and returns a google analytics tracking cookie.
+     */
+    protected String getGATrackingCode() {
         if (_trackingGAHash == null) {
             return "";
         }
@@ -1731,7 +1605,7 @@ public class Application
         }
         if (_trackingId == 0) {
             int low = 100000000, high = 1000000000;
-            _trackingId = low + _rando.nextInt(high-low);
+            _trackingId = low + _rando.nextInt(high - low);
         }
         StringBuilder cookie = new StringBuilder("&utmcc=__utma%3D").append(_trackingGAHash);
         cookie.append(".").append(_trackingId);
@@ -1741,89 +1615,263 @@ public class Application
         cookie.append(_trackingStart).append(".1.1.");
         cookie.append("utmcsr%3D(direct)%7Cutmccn%3D(direct)%7Cutmcmd%3D(none)%3B");
         int low = 1000000000, high = 2000000000;
-        cookie.append("&utmn=").append(_rando.nextInt(high-low));
+        cookie.append("&utmn=").append(_rando.nextInt(high - low));
         return cookie.toString();
     }
 
-    /**
-     * Encodes a path for use in a URL.
-     */
-    protected static String encodePath (String path)
-    {
-        try {
-            // we want to keep slashes because we're encoding an entire path; also we need to turn
-            // + into %20 because web servers don't like + in paths or file names, blah
-            return URLEncoder.encode(path, "UTF-8").replace("%2F", "/").replace("+", "%20");
-        } catch (UnsupportedEncodingException ue) {
-            log.warning("Failed to URL encode " + path + ": " + ue);
-            return path;
+    public void readAuthentication() {
+        File file = new File(getAppDir(), Application.AUTHENTICATION_FILE);
+        if (file.exists()) {
+            try {
+                String data = new String(Files.readAllBytes(Paths.get(Application.AUTHENTICATION_FILE)));
+                String[] split = data.split(";");
+                username = new String(Base64.decode(split[0], Base64.NO_WRAP));
+                password = new String(Base64.decode(split[1], Base64.NO_WRAP));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
-    protected final EnvConfig _envc;
-    protected Digest _digest;
+    public void writeAuthentication() {
+        File file = new File(getAppDir(), Application.AUTHENTICATION_FILE);
+        try {
+            PrintWriter writer = new PrintWriter(Application.AUTHENTICATION_FILE);
+            if (file.exists()) {
+                writer.print("");
+            }
+            String auth =  Base64.encodeToString(username.getBytes(), Base64.NO_WRAP) + ";" +
+                Base64.encodeToString(password.getBytes(), Base64.NO_WRAP);
+            writer.println(auth);
+            writer.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
-    protected long _version = -1;
-    protected long _targetVersion = -1;
-    protected String _appbase;
-    protected URL _vappbase;
-    protected URL _latest;
-    protected String _class;
-    protected String _dockName;
-    protected String _dockIconPath;
-    protected boolean _strictComments;
-    protected boolean _allowOffline;
-    protected int _maxConcDownloads;
+    public String getUsername() {
+        return username;
+    }
 
-    protected String _trackingURL;
-    protected Set<Integer> _trackingPcts;
-    protected String _trackingCookieName;
-    protected String _trackingCookieProperty;
-    protected String _trackingURLSuffix;
-    protected String _trackingGAHash;
-    protected long _trackingStart;
-    protected int _trackingId;
+    public String getPassword() {
+        return password;
+    }
 
-    protected String _javaVersionProp = "java.version";
-    protected String _javaVersionRegex = "(\\d+)(?:\\.(\\d+)(?:\\.(\\d+)(_\\d+)?)?)?";
-    protected long _javaMinVersion, _javaMaxVersion;
-    protected boolean _javaExactVersionRequired;
-    protected String _javaLocation;
-    protected File _javaLocalDir;
+    public void createUsernamePassword(String username, String password) {
+        this.username = username;
+        this.password = password;
+    }
 
-    protected final List<Resource> _codes = new ArrayList<>();
-    protected final List<Resource> _resources = new ArrayList<>();
-    protected final List<String> _cleanupPatterns = new ArrayList<>();
-    protected final List<String> _cpdirs = new ArrayList<>();
+    public String getBasicAuth() {
+        if(username == null || password == null)
+            return null;
+        String userPassword = username + ":" + password;
+        return "Basic "+ Base64.encodeToString(userPassword.getBytes(), Base64.NO_WRAP);
+    }
 
-    protected int _verifyTimeout = 60;
+    protected static enum RevalidatePolicy {ALWAYS, AFTER_UPDATE}
 
-    protected RevalidatePolicy _revalidatePolicy = RevalidatePolicy.AFTER_UPDATE;
-    protected boolean _useCodeCache;
-    protected int _codeCacheRetentionDays;
+    /**
+     * Used by {@link #verifyMetadata} to communicate status in circumstances where it needs to
+     * take network actions.
+     */
+    public interface StatusDisplay {
+        /**
+         * Requests that the specified status message be displayed.
+         */
+        void updateStatus(String message);
+    }
 
-    protected final Map<String,AuxGroup> _auxgroups = new HashMap<>();
-    protected final Map<String,Boolean> _auxactive = new HashMap<>();
+    /**
+     * Used to communicate information about the UI displayed when updating the application.
+     */
+    public static final class UpdateInterface {
+        /**
+         * The human readable name of this application.
+         */
+        public final String name;
+        /**
+         * A background color, just in case.
+         */
+        public final int background;
+        /**
+         * Background image specifiers for `RotatingBackgrounds`.
+         */
+        public final List<String> rotatingBackgrounds;
+        /**
+         * The error background image for `RotatingBackgrounds`.
+         */
+        public final String errorBackground;
+        /**
+         * The paths (relative to the appdir) of images for the window icon.
+         */
+        public final List<String> iconImages;
+        /**
+         * The path (relative to the appdir) to a single background image.
+         */
+        public final String backgroundImage;
+        /**
+         * The path (relative to the appdir) to the progress bar image.
+         */
+        public final String progressImage;
+        /**
+         * The dimensions of the progress bar.
+         */
+        public final Rectangle progress;
+        /**
+         * The color of the progress text.
+         */
+        public final int progressText;
+        /**
+         * The color of the progress bar.
+         */
+        public final int progressBar;
+        /**
+         * The dimensions of the status display.
+         */
+        public final Rectangle status;
+        /**
+         * The color of the status text.
+         */
+        public final int statusText;
+        /**
+         * The color of the text shadow.
+         */
+        public final int textShadow;
+        /**
+         * Where to point the user for help with install errors.
+         */
+        public final String installError;
+        /**
+         * The dimensions of the patch notes button.
+         */
+        public final Rectangle patchNotes;
+        /**
+         * The patch notes URL.
+         */
+        public final String patchNotesUrl;
+        /**
+         * Whether window decorations are hidden for the UI.
+         */
+        public final boolean hideDecorations;
+        /**
+         * Whether progress text should be hidden or not.
+         */
+        public final boolean hideProgressText;
+        /**
+         * The minimum number of seconds to display the GUI. This is to prevent the GUI from
+         * flashing up on the screen and immediately disappearing, which can be confusing to the
+         * user.
+         */
+        public final int minShowSeconds;
+        /**
+         * The global percentages for each step. A step may have more than one, and
+         * the lowest reasonable one is used if a step is revisited.
+         */
+        public final Map<Step, List<Integer>> stepPercentages;
 
-    protected final List<String> _jvmargs = new ArrayList<>();
-    protected final List<String> _appargs = new ArrayList<>();
+        public UpdateInterface(Config config) {
+            this.name = config.getString("ui.name");
+            this.progress = config.getRect("ui.progress", new Rectangle(5, 5, 300, 15));
+            this.progressText = config.getColor("ui.progress_text", Color.BLACK);
+            this.hideProgressText = config.getBoolean("ui.hide_progress_text");
+            this.minShowSeconds = config.getInt("ui.min_show_seconds", 5);
+            this.progressBar = config.getColor("ui.progress_bar", 0x6699CC);
+            this.status = config.getRect("ui.status", new Rectangle(5, 25, 500, 100));
+            this.statusText = config.getColor("ui.status_text", Color.BLACK);
+            this.textShadow = config.getColor("ui.text_shadow", Color.CLEAR);
+            this.hideDecorations = config.getBoolean("ui.hide_decorations");
+            this.backgroundImage = config.getString("ui.background_image");
+            // default to black or white bg color, depending on the brightness of the progressText
+            int defaultBackground = (0.5f < Color.brightness(this.progressText)) ?
+                Color.BLACK : Color.WHITE;
+            this.background = config.getColor("ui.background", defaultBackground);
+            this.progressImage = config.getString("ui.progress_image");
+            this.rotatingBackgrounds = stringsToList(
+                config.getMultiValue("ui.rotating_background"));
+            this.iconImages = stringsToList(config.getMultiValue("ui.icon"));
+            this.errorBackground = config.getString("ui.error_background");
 
-    protected String[] _optimumJvmArgs;
+            // On an installation error, where do we point the user.
+            String installError = config.getUrl("ui.install_error", null);
+            this.installError = (installError == null) ?
+                "m.default_install_error" : MessageUtil.taint(installError);
 
-    protected final List<String> _txtJvmArgs = new ArrayList<>();
+            // the patch notes bits
+            this.patchNotes = config.getRect("ui.patch_notes", new Rectangle(5, 50, 112, 26));
+            this.patchNotesUrl = config.getUrl("ui.patch_notes_url", null);
 
-    /** Locks gettingdown.lock in the app dir. Held the entire time updating is going on.*/
-    protected FileLock _lock;
+            // step progress percentage (defaults and then customized values)
+            EnumMap<Step, List<Integer>> stepPercentages = new EnumMap<>(Step.class);
+            for (Step step : Step.values()) {
+                stepPercentages.put(step, step.defaultPercents);
+            }
+            for (UpdateInterface.Step step : UpdateInterface.Step.values()) {
+                String spec = config.getString("ui.percents." + step.name());
+                if (spec != null) {
+                    try {
+                        stepPercentages.put(step, intsToList(StringUtil.parseIntArray(spec)));
+                    } catch (Exception e) {
+                        log.warning("Failed to parse percentages for " + step + ": " + spec);
+                    }
+                }
+            }
+            this.stepPercentages = Collections.unmodifiableMap(stepPercentages);
+        }
 
-    /** Channel to the file underlying _lock.  Kept around solely so the lock doesn't close. */
-    protected FileChannel _lockChannel;
+        /**
+         * Generates a string representation of this instance.
+         */
+        @Override
+        public String toString() {
+            return "[name=" + name + ", bg=" + background + ", bg=" + backgroundImage +
+                ", pi=" + progressImage + ", prect=" + progress + ", pt=" + progressText +
+                ", pb=" + progressBar + ", srect=" + status + ", st=" + statusText +
+                ", shadow=" + textShadow + ", err=" + installError + ", nrect=" + patchNotes +
+                ", notes=" + patchNotesUrl + ", stepPercentages=" + stepPercentages +
+                ", hideProgressText" + hideProgressText + ", minShow=" + minShowSeconds + "]";
+        }
 
-    protected final Random _rando = new Random();
+        /**
+         * The major steps involved in updating, along with some arbitrary percentages
+         * assigned to them, to mark global progress.
+         */
+        public enum Step {
+            UPDATE_JAVA(10),
+            VERIFY_METADATA(15, 65, 95),
+            DOWNLOAD(40),
+            PATCH(60),
+            VERIFY_RESOURCES(70, 97),
+            REDOWNLOAD_RESOURCES(90),
+            UNPACK(98),
+            LAUNCH(99);
 
-    protected static final String[] EMPTY_STRING_ARRAY = new String[0];
+            /**
+             * What is the final percent value for this step?
+             */
+            public final List<Integer> defaultPercents;
 
-    protected static final String ENV_VAR_PREFIX = "%ENV.";
-    protected static final Pattern ENV_VAR_PATTERN = Pattern.compile("%ENV\\.(.*?)%");
+            /**
+             * Enum constructor.
+             */
+            Step(int... percents) {
+                this.defaultPercents = intsToList(percents);
+            }
+        }
+    }
 
-    protected static enum RevalidatePolicy { ALWAYS, AFTER_UPDATE }
+    /**
+     * Contains metadata for an auxiliary resource group.
+     */
+    public static class AuxGroup {
+        public final String name;
+        public final List<Resource> codes;
+        public final List<Resource> rsrcs;
+
+        public AuxGroup(String name, List<Resource> codes, List<Resource> rsrcs) {
+            this.name = name;
+            this.codes = Collections.unmodifiableList(codes);
+            this.rsrcs = Collections.unmodifiableList(rsrcs);
+        }
+    }
 }

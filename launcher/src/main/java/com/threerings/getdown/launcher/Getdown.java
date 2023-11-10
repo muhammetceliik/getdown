@@ -191,6 +191,22 @@ public abstract class Getdown
             return;
         }
 
+        try {
+            _app.init(true);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        if (_app.useAuthentication()) {
+            _app.readAuthentication();
+            if (_app.getUsername() == null || _app.getPassword() == null) {
+                AuthenticationPanel authenticationPanel = new AuthenticationPanel(this);
+                authenticationPanel.pack();
+                SwingUtil.centerWindow(authenticationPanel);
+                authenticationPanel.setVisible(true);
+            }
+        }
+
         _dead = false;
         // if we fail to detect a proxy, but we're allowed to run offline, then go ahead and
         // run the app anyway because we're prepared to cope with not being able to update

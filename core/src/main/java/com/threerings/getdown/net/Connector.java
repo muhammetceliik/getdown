@@ -115,7 +115,7 @@ public class Connector {
     /**
      * Downloads {@code url} into {@code target}.
      */
-    public void download (URL url, File target) throws IOException {
+    public void download (URL url, File target, String basicAuth) throws IOException {
         URLConnection conn = open(url, 0, 0);
         // we have to tell Java not to use caches here, otherwise it will cache any request for
         // same URL for the lifetime of this JVM (based on the URL string, not the URL object);
@@ -124,6 +124,8 @@ public class Connector {
         // to download a file, it expects it to come over the wire, not from a cache
         conn.setUseCaches(false);
         conn.setRequestProperty("Accept-Encoding", "gzip");
+        if(basicAuth != null)
+            conn.setRequestProperty ("Authorization", basicAuth);
         checkConnectOK(conn, "Unable to download " + url);
         try (InputStream fin = conn.getInputStream()) {
             String encoding = conn.getContentEncoding();
@@ -139,8 +141,10 @@ public class Connector {
     /**
      * Fetches the data at {@code url} into a string.
      */
-    public String fetch (URL url) throws IOException {
+    public String fetch (URL url, String basicAuth) throws IOException {
         URLConnection conn = open(url, 0, 0);
+        if(basicAuth != null)
+            conn.setRequestProperty ("Authorization", basicAuth);
         checkConnectOK(conn, "Unable to fetch " + url);
         int size = conn.getContentLength();
         ByteArrayOutputStream out = new ByteArrayOutputStream(size > 0 ? size : 1024);
